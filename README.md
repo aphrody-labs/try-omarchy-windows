@@ -73,6 +73,13 @@ cd try-omarchy-windows/app
 GOOS=windows GOARCH=amd64 go build -trimpath -ldflags "-H windowsgui -s -w" -o TryOmarchy.exe .
 ```
 
+### MSYS2 runtime
+
+The Aphrody fork can use QEMU directly from an existing MSYS2 installation.
+Run `scripts/bootstrap-msys2.ps1`; the launcher then probes UCRT64, CLANG64,
+MINGW64 and MSYS in that order. Override the root with
+`TRYOMARCHY_MSYS2_ROOT` or select one executable with `TRYOMARCHY_QEMU`.
+
 ## Credits and license
 
 Try Omarchy for Windows builds on [Omarchy](https://github.com/basecamp/omarchy), Eduardo's original Try Omarchy app, Jorge Silva's [Windows guest builder](https://github.com/jorge-huxley/try-omarchy-win), [WINQ-EMU](https://github.com/cmspam/winq-emu), and [Chainfire's Windows GPU work](https://github.com/Chainfire/omarchy-windows-hyperv-gpu). Thanks to the [dockur/windows](https://github.com/dockur/windows) project for the Windows development environment.

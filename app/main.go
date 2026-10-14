@@ -779,7 +779,7 @@ func main() {
 	}
 
 	const qemuExe = "qemu-system-x86_64w.exe"
-	stockQemu := `C:\Program Files\qemu\` + qemuExe
+	stockQemu := stockQEMUPath()
 	_, stockErr := os.Stat(stockQemu)
 	haveStock := stockErr == nil && !cfg.portable && !snapshotRecovery && guestDisplayCount(cfg.displays) == 1
 	gpuRoot := ""
