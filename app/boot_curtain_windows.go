@@ -48,6 +48,8 @@ var (
 	curtainCapturing atomic.Bool
 	curtainBoot      time.Time
 	curtainStatus    string
+	// When watchDesktop last looked at the window after the curtain lifted.
+	desktopCheckedAt time.Time
 )
 
 type curtainWindow struct {
@@ -184,6 +186,7 @@ func curtainTaskbar(hwnd uintptr) {
 // primary is the window of the guest's first display, or 0.
 func curtainTick(primary uintptr) {
 	if !curtainUp.Load() {
+		watchDesktop(primary)
 		return
 	}
 	times := curtainTimes()
@@ -215,14 +218,54 @@ func curtainTick(primary uintptr) {
 	if primary != 0 && times.checkPaint() && curtainCapturing.CompareAndSwap(false, true) {
 		go func() {
 			defer curtainCapturing.Store(false)
-			if windowShowsDesktop(primary) {
+			painted := windowShowsDesktop(primary)
+			if painted {
 				curtainPainted.Add(1)
 			} else {
 				curtainPainted.Store(0)
 			}
+			if desktopShown.look(time.Now(), painted) {
+				desktopSeen.Store(true)
+			}
 			wakeTitleEnforcer()
 		}()
 	}
+}
+
+// watchDesktop keeps looking at a shown window every few seconds until it
+// has kept showing the desktop for desktopSteadyWait in this boot. A
+// minimized or hidden window is not looked at.
+func watchDesktop(primary uintptr) {
+	times := curtainTimes()
+	if desktopSeen.Load() {
+		return
+	}
+	// A hidden window is left out of the window list, so its time off
+	// screen must not count toward the streak either.
+	if primary == 0 {
+		desktopShown.reset()
+		return
+	}
+	if !times.checkPaint() || time.Since(desktopCheckedAt) < desktopCheckInterval {
+		return
+	}
+	visible, _, _ := procIsWindowVisible.Call(primary)
+	if iconic, _, _ := procIsIconic.Call(primary); iconic != 0 || visible == 0 {
+		desktopShown.reset()
+		return
+	}
+	if !curtainCapturing.CompareAndSwap(false, true) {
+		return
+	}
+	desktopCheckedAt = time.Now()
+	go func() {
+		defer curtainCapturing.Store(false)
+		painted := windowShowsDesktop(primary)
+		desktopLooks.Add(1)
+		if desktopShown.look(time.Now(), painted) {
+			desktopSeen.Store(true)
+		}
+	}()
 }
 
 // curtainPolling makes the title enforcer look more often while the

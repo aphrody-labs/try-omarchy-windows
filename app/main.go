@@ -766,9 +766,11 @@ func main() {
 	}
 
 	// Machine setup the old bootstrap.ps1 handled: hypervisor on (may walk the
-	// user through one restart and exit), then a QEMU to run. Existing setups
-	// win - C:\WINQ-EMU, then a previously downloaded runtime, then stock QEMU
-	// from the bootstrap; a bare machine downloads the portable WINQ-EMU tree.
+	// user through one restart and exit), then a QEMU to run: C:\WINQ-EMU if
+	// present, otherwise the bundled runtime, downloaded when missing. Stock QEMU
+	// from the old bootstrap is only a fallback when the runtime cannot be set
+	// up, CPU rendering included: stock WHPX misses QMP at startup and wedges
+	// instead of exiting after a guest poweroff (docs/FINDINGS.md).
 	ensureWHP(cfg)
 	if finishSetupCancellation(cfg, checkSetupCancelled()) {
 		return
@@ -791,7 +793,7 @@ func main() {
 			gpuRoot = cfg.winqEmu
 		}
 	}
-	if gpuRoot == "" && !(cfg.noGpu && haveStock && cfg.share == "") {
+	if gpuRoot == "" {
 		if payloadsRolledBack {
 			root := filepath.Join(cfg.dir, "runtime")
 			info, err := os.Stat(filepath.Join(root, "bin", qemuExe))
@@ -1340,9 +1342,12 @@ func watch(cfg *config, qmp *qmpConn, exited <-chan error) bool {
 		if recovery != nil || !postReady || setupCancelled() || pendingReboot.Load() || guestCompositorHealth.suppressRecovery() {
 			return
 		}
-		logf("display health: %s stopped responding; preserving session while offering recovery", trigger)
+		if trigger != "blank" {
+			logf("display health: %s stopped responding; preserving session while offering recovery", trigger)
+		}
 		suggest := false
-		if cfg.useGpu {
+		// A window that never showed the desktop is not a freeze.
+		if cfg.useGpu && trigger != "blank" {
 			var err error
 			suggest, err = recordGPUFreeze(cfg.dir, cfg.renderMode, true, postReady, cfg.runtimeID, cfg.displayDriver)
 			if err != nil {
@@ -1379,6 +1384,9 @@ func watch(cfg *config, qmp *qmpConn, exited <-chan error) bool {
 			result <- chooseFreezeRecovery(dialogContext.Done(), snapshotCfg.useGpu, trigger, bundle, err, suggest)
 		}()
 	}
+	// GPU rendering is recorded as working only once Windows has shown the
+	// desktop in the Omarchy window; blankOffered asks once per boot.
+	gpuRecordPending, blankOffered := false, false
 	tick := 0
 	ticker := time.NewTicker(time.Second)
 	defer ticker.Stop()
@@ -1413,7 +1421,10 @@ func watch(cfg *config, qmp *qmpConn, exited <-chan error) bool {
 				pruneCommittedUpdatePayloads(cfg)
 			}
 			startReadyUpdateCheck()
-			recordRenderResult(cfg)
+			gpuRecordPending, blankOffered = cfg.useGpu, false
+			if !cfg.useGpu {
+				recordRenderResult(cfg)
+			}
 			movedBootPending = true
 		}
 		if movedBootPending && markMovedGuestReady(cfg.dir) {
@@ -1527,6 +1538,18 @@ func watch(cfg *config, qmp *qmpConn, exited <-chan error) bool {
 			lastTick = now
 			if stopDeadline == nil && !pendingReboot.Load() && !setupCancelled() && guestCompositorHealth.stalled(now, qmpRunning && now.Sub(lastReply) < 15*time.Second) {
 				offerRecovery("compositor")
+			}
+			if gpuRecordPending && desktopSeen.Load() {
+				gpuRecordPending = false
+				recordRenderResult(cfg)
+			}
+			if gpuRecordPending && !blankOffered && recovery == nil && stopDeadline == nil && !pendingReboot.Load() && !setupCancelled() &&
+				curtainTimes().blankDesktopDue(now, desktopLooks.Load()) {
+				blankOffered = true
+				if probe, _ := loadRenderProbe(cfg.dir); !gpuDesktopConfirmed(probe, cfg.runtimeID, cfg.displayDriver) {
+					logf("display health: GPU rendering has not shown the desktop in the Omarchy window")
+					offerRecovery("blank")
+				}
 			}
 			tick++
 			if tick%5 == 0 {
@@ -1712,7 +1735,8 @@ func recordRenderResult(cfg *config) {
 	if cfg.useGpu {
 		result = renderGPU
 	}
-	probe := renderProbe{Result: result, RuntimeID: cfg.runtimeID, DisplayDriver: cfg.displayDriver, RecordedAt: time.Now()}
+	// The supervisor records GPU only after the window showed the desktop.
+	probe := renderProbe{Result: result, RuntimeID: cfg.runtimeID, DisplayDriver: cfg.displayDriver, RecordedAt: time.Now(), DesktopSeen: cfg.useGpu}
 	if err := saveRenderProbe(cfg.dir, probe); err != nil {
 		logf("could not record the rendering result: %v", err)
 	}

@@ -3,6 +3,7 @@ package main
 import (
 	"slices"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -25,6 +26,61 @@ const (
 	curtainSlowNotice = 60 * time.Second
 )
 
+// After the curtain lifts, a GPU boot keeps looking at the window until it
+// has kept showing the desktop for a while. Some drivers run the guest but never present its frames
+// on Windows (#358), and that boot must not count as working GPU rendering.
+const (
+	desktopCheckInterval = 5 * time.Second
+	// From the start of the desktop session until the user is asked about a
+	// window that has not shown the desktop.
+	blankDesktopWait = 2 * time.Minute
+	// Looks at the visible window needed before asking, so a window kept
+	// minimized is never taken for a blank one.
+	blankDesktopLooks = 6
+	// How long every look must keep showing the desktop before the boot
+	// counts as having shown it. Some cards draw the wallpaper for about a
+	// second and then leave the window black (#358).
+	desktopSteadyWait = 15 * time.Second
+	// Looks further apart than this start the streak over, so time nobody
+	// looked at the window (hidden, or a capture held up) never counts.
+	desktopLookGap = 12 * time.Second
+)
+
+var (
+	// desktopSeen is set once this boot's window has kept showing the desktop
+	// for desktopSteadyWait.
+	desktopSeen atomic.Bool
+	// desktopLooks counts this boot's looks at the visible window.
+	desktopLooks atomic.Int32
+	desktopShown desktopStreak
+)
+
+// desktopStreak follows the looks at the window that showed the desktop
+// without a break.
+type desktopStreak struct {
+	mu          sync.Mutex
+	since, last time.Time
+}
+
+// look records one look and reports whether the desktop has been on screen
+// for desktopSteadyWait. A look without the desktop starts over.
+func (s *desktopStreak) look(now time.Time, painted bool) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if !painted {
+		s.since, s.last = time.Time{}, time.Time{}
+		return false
+	}
+	if s.since.IsZero() || now.Sub(s.last) > desktopLookGap {
+		s.since = now
+	}
+	s.last = now
+	return now.Sub(s.since) >= desktopSteadyWait
+}
+
+// reset forgets the streak, for a new boot or a window that was hidden.
+func (s *desktopStreak) reset() { s.look(time.Time{}, false) }
+
 type bootCurtainTimes struct {
 	boot, ready, session time.Time
 }
@@ -43,6 +99,16 @@ func (t bootCurtainTimes) liftReason(now time.Time, painted bool) string {
 		return "the boot is taking too long"
 	}
 	return ""
+}
+
+// blankDesktopDue reports whether a window that never showed the desktop has
+// been watched long enough to ask the user about it.
+func (t bootCurtainTimes) blankDesktopDue(now time.Time, looks int32) bool {
+	start := t.session
+	if start.IsZero() {
+		start = t.ready
+	}
+	return !start.IsZero() && now.Sub(start) >= blankDesktopWait && looks >= blankDesktopLooks
 }
 
 // checkPaint is true once the screen can show something other than boot

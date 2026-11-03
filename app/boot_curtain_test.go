@@ -137,3 +137,74 @@ func TestFramePaintedRejectsShortBuffers(t *testing.T) {
 	// Wide and short: the sample blocks must stay inside the frame.
 	framePainted(make([]byte, 3840*20*4), 3840, 20, 3840*4)
 }
+
+func TestBlankDesktopDue(t *testing.T) {
+	start := time.Unix(1000, 0)
+	if (bootCurtainTimes{}).blankDesktopDue(start.Add(time.Hour), blankDesktopLooks) {
+		t.Fatal("asked before Omarchy reported ready")
+	}
+	ready := bootCurtainTimes{boot: start, ready: start}
+	if ready.blankDesktopDue(start.Add(blankDesktopWait-time.Second), blankDesktopLooks) {
+		t.Fatal("asked before the wait")
+	}
+	if !ready.blankDesktopDue(start.Add(blankDesktopWait), blankDesktopLooks) {
+		t.Fatal("no session: the wait counts from ready")
+	}
+	session := bootCurtainTimes{boot: start, ready: start, session: start.Add(time.Minute)}
+	if session.blankDesktopDue(start.Add(blankDesktopWait), blankDesktopLooks) {
+		t.Fatal("the wait counts from the session start")
+	}
+	if !session.blankDesktopDue(start.Add(time.Minute+blankDesktopWait), blankDesktopLooks) {
+		t.Fatal("expected to ask after the session wait")
+	}
+	// A window kept minimized was never looked at, so it is not blank.
+	if session.blankDesktopDue(start.Add(time.Hour), blankDesktopLooks-1) {
+		t.Fatal("asked without enough looks at the visible window")
+	}
+}
+
+func TestDesktopStreakNeedsTheDesktopToStay(t *testing.T) {
+	start := time.Unix(1000, 0)
+	var streak desktopStreak
+	// The wallpaper flashes for a second, then the window goes black (#358).
+	if streak.look(start, true) || streak.look(start.Add(time.Second), true) {
+		t.Fatal("a one-second flash counted as the desktop")
+	}
+	for i := 2; i < 30; i++ {
+		if streak.look(start.Add(time.Duration(i)*5*time.Second), false) {
+			t.Fatal("a black window counted as the desktop")
+		}
+	}
+	// A desktop drawn later still counts once it stays.
+	later := start.Add(5 * time.Minute)
+	if streak.look(later, true) || streak.look(later.Add(5*time.Second), true) || streak.look(later.Add(desktopSteadyWait-time.Second), true) {
+		t.Fatal("counted before the steady wait")
+	}
+	if !streak.look(later.Add(desktopSteadyWait), true) {
+		t.Fatal("a desktop that stayed on screen did not count")
+	}
+	streak.reset()
+	if streak.look(later.Add(desktopSteadyWait+time.Second), true) {
+		t.Fatal("reset kept the earlier streak")
+	}
+}
+
+func TestDesktopStreakIgnoresTimeWithoutLooks(t *testing.T) {
+	start := time.Unix(1000, 0)
+	var streak desktopStreak
+	// One painted look, then nobody looked for a minute (a hidden window or
+	// a capture held up): that minute does not count.
+	streak.look(start, true)
+	if streak.look(start.Add(time.Minute), true) {
+		t.Fatal("unobserved time counted toward the streak")
+	}
+	restored := start.Add(time.Minute)
+	for i := 1; i < 3; i++ {
+		if streak.look(restored.Add(time.Duration(i)*5*time.Second), true) {
+			t.Fatal("counted before the steady wait after the gap")
+		}
+	}
+	if !streak.look(restored.Add(desktopSteadyWait), true) {
+		t.Fatal("looks after the gap did not count")
+	}
+}
